@@ -31,7 +31,8 @@ class ShellDock extends StatelessWidget {
   final bool staticMaterial;
 
   /// 页面切换动画进行中：经典 dock 跳过 BackdropFilter 实时模糊；档案
-  /// GlassDock 同样改用轻量预设，不做实时折射与边缘模糊。
+  /// GlassDock 同样换成 liquid_glass_widgets 的无着色器材质，不做实时折射
+  /// 与边缘模糊。
   final bool animating;
 
   static const _items = [
@@ -77,6 +78,8 @@ class ShellDock extends StatelessWidget {
     // 页面切换动画期间与静态底板同待遇：轻量预设关掉 glass/blur/edgeBlur，
     // 胶囊折射与 underlay 边缘模糊一并跳过，不对滑动中的页面每帧做全屏
     // 高斯模糊（动画结束自动恢复），与经典 dock 的 animating 行为对齐。
+    // GlassDock 同时收到 staticMaterial / animating，由它把
+    // liquid_glass_widgets 降到无着色器材质。
     Widget dock = WenkuScope(
       entrance: false,
       performance: staticMaterial || animating
@@ -170,6 +173,8 @@ class ShellDock extends StatelessWidget {
                 key: const ValueKey('liquid-dock'),
                 selectedIndex: selectedIndex,
                 reduceMotion: eink,
+                staticMaterial: staticMaterial,
+                animating: animating,
                 onSelected: onSelected,
                 onReselected: onSelected,
                 items: _items,

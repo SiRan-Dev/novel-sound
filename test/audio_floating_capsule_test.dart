@@ -204,7 +204,8 @@ void main() {
     app.navigator.currentState!.pop();
     await _flush(tester);
     expect(find.byType(AudioPage), findsNothing);
-    expect(find.text('书架'), findsOneWidget);
+    // The archive GlassTabBar keeps a lens copy of every label.
+    expect(find.text('书架'), findsWidgets);
   });
 
   testWidgets('buffering keeps pause available, as on the listening page', (

@@ -1,48 +1,45 @@
-import 'dart:async';
+// Bottom navigation material rebuilt on `liquid_glass_widgets`
+// (`GlassTabBar.bottom`): the package owns the glass track, the jelly indicator,
+// the press glow/scale and the sliding drag between lanes. fqapp keeps the
+// archive geometry (compact capsule, item width, 4 lanes), the archive icons and
+// the cost policy: pages, video streams and e-ink never run a live refraction
+// shader — they get the shader-free solid/minimal material instead.
+import 'dart:math' as math;
 
 import 'package:cupertino_ui/cupertino_ui.dart';
+import 'package:liquid_glass_widgets/liquid_glass_widgets.dart';
 import 'package:material_ui/material_ui.dart';
-import 'package:flutter/physics.dart';
 
-import 'src/app_text.dart';
+import 'src/app_haptics.dart';
+import 'src/archive_icons.dart';
 import 'src/dock_layout.dart';
 import 'src/performance_preferences.dart';
-import 'wenku_glass.dart';
-import 'wenku_icons.dart';
 import 'wenku_theme.dart';
 
 class GlassDockItem {
   const GlassDockItem(
     this.icon,
     this.label, {
-    this.enabled = true,
     this.semanticLabel,
-    this.selectableOnDrag = true,
-    this.id,
     this.symbol,
     this.haptic = HapticCue.selection,
   });
+
   final IconData icon;
   final String label;
-  final bool enabled;
   final String? semanticLabel;
-  final bool selectableOnDrag;
-  final Object? id;
   final ArchiveSymbol? symbol;
   final HapticCue haptic;
-  Object get identity => id ?? (icon, label);
+
+  Object get identity => (icon, label);
 }
 
-class _DockSlot {
-  _DockSlot(this.item, this.fromWidth, this.present);
-  GlassDockItem item;
-  double fromWidth;
-  bool present;
-  double width(double progress, double targetWidth) =>
-      fromWidth + ((present ? targetWidth : 0) - fromWidth) * progress;
-}
-
-/// The touch preview is local to the dock: pages only change on release.
+/// The floating archive dock.
+///
+/// Selection is reported on release, like the previous implementation: the
+/// package previews the finger's lane locally and only calls
+/// [onSelected] once the gesture resolves. A tap on the selected lane reports
+/// through [onReselected] when provided.
 class GlassDock extends StatefulWidget {
   const GlassDock({
     super.key,
@@ -52,6 +49,8 @@ class GlassDock extends StatefulWidget {
     this.reduceMotion = false,
     this.animateInactiveIcons = false,
     this.itemWidth = DockLayout.itemWidth,
+    this.staticMaterial = false,
+    this.animating = false,
     this.items = const [
       GlassDockItem(CupertinoIcons.house, '发现'),
       GlassDockItem(CupertinoIcons.book, '书架', symbol: ArchiveSymbol.shelf),
@@ -67,526 +66,187 @@ class GlassDock extends StatefulWidget {
   final ValueChanged<int>? onReselected;
   final bool reduceMotion;
 
-  /// Navigation only animates the destination. Action docks (previous/next
-  /// chapter) can also animate invoked controls without selecting their lane.
+  /// Action docks (previous/next chapter) can replay invoked icons without
+  /// selecting their lane; navigation docks animate the selected icon only.
   final bool animateInactiveIcons;
   final List<GlassDockItem> items;
 
-  /// Optional narrow-screen lanes; existing navigation keeps its geometry.
+  /// Optional narrow-screen lane width; the capsule keeps its archive geometry.
   final double itemWidth;
+
+  /// Behind each frame is a video stream (or OLED black): no live shader.
+  final bool staticMaterial;
+
+  /// Page transition in flight: the dock skips refraction until it settles.
+  final bool animating;
 
   @override
   State<GlassDock> createState() => _GlassDockState();
 }
 
-class _GlassDockState extends State<GlassDock> with TickerProviderStateMixin {
-  static const _edge = DockLayout.horizontalInset;
-  late final AnimationController _position = AnimationController.unbounded(
-    vsync: this,
-    value: widget.selectedIndex.toDouble(),
-  );
-  late final AnimationController _press = AnimationController.unbounded(
-    vsync: this,
-  );
-  late final AnimationController _stretch = AnimationController.unbounded(
-    vsync: this,
-  );
-  late final _membership = AnimationController(
-    vsync: this,
-    duration: WenkuMotion.enter,
-    value: 1,
-  );
-  late List<_DockSlot> _slots;
-  late final Listenable _motion = Listenable.merge([
-    _position,
-    _press,
-    _stretch,
-    _membership,
-  ]);
-  late int _targetIndex = widget.selectedIndex;
-  double _segmentWidth = 1;
-  double _lastX = 0;
-  Duration _lastTime = Duration.zero;
-  int? _pointer;
-  final Map<Object, int> _iconActivations = {};
-  Timer? _restTimer;
-  bool _dragging = false;
-  bool _reduceMotion = false;
-  bool _pointerCancelled = false;
+class _GlassDockState extends State<GlassDock> {
+  /// Replays the archive icon's contact animation when a lane is accepted.
+  final Map<Object, int> _activations = {};
 
-  @override
-  void initState() {
-    super.initState();
-    _slots = [
-      for (final item in widget.items) _DockSlot(item, widget.itemWidth, true),
-    ];
-  }
-
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    _reduceMotion =
-        widget.reduceMotion || MediaQuery.disableAnimationsOf(context);
-    if (_reduceMotion && _membership.isAnimating) _membership.value = 1;
-  }
-
-  @override
-  void didUpdateWidget(GlassDock oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    _reduceMotion =
-        widget.reduceMotion || MediaQuery.disableAnimationsOf(context);
-    final membershipChanged =
-        oldWidget.items.length != widget.items.length ||
-        oldWidget.items.indexed.any(
-          (entry) => entry.$2.identity != widget.items[entry.$1].identity,
-        );
-    if (membershipChanged) {
-      _restTimer?.cancel();
-      _pointer = null;
-      _pointerCancelled = true;
-      _dragging = false;
-      _position.stop();
-      _press.stop();
-      _stretch.stop();
-      _targetIndex = widget.selectedIndex;
-      _position.value = widget.selectedIndex.toDouble();
-      _press.value = _stretch.value = 0;
-      final progress = WenkuMotion.ease.transform(_membership.value);
-      _slots = [
-        for (final slot in _slots)
-          if (slot.width(progress, widget.itemWidth) > .001)
-            _DockSlot(slot.item, slot.width(progress, widget.itemWidth), false),
-      ];
-      for (var index = 0; index < widget.items.length; index++) {
-        final item = widget.items[index];
-        final existing = _slots.indexWhere(
-          (slot) => slot.item.identity == item.identity,
-        );
-        if (existing >= 0) {
-          _slots[existing]
-            ..item = item
-            ..present = true;
-        } else {
-          // Insert before the next surviving destination: retained controls
-          // travel with the opening capsule instead of cross-fading as a row.
-          final following = widget.items.skip(index + 1).map((i) => i.identity);
-          final before = _slots.indexWhere(
-            (slot) => following.contains(slot.item.identity),
-          );
-          _slots.insert(
-            before < 0 ? _slots.length : before,
-            _DockSlot(item, 0, true),
-          );
-        }
-      }
-      if (_reduceMotion) {
-        _membership.value = 1;
-      } else {
-        _membership.forward(from: 0);
-      }
-    } else if (widget.selectedIndex != _targetIndex) {
-      _settlePosition(widget.selectedIndex);
-    }
-    if (!membershipChanged) {
-      for (final slot in _slots.where((slot) => slot.present)) {
-        slot.item = widget.items.firstWhere(
-          (item) => item.identity == slot.item.identity,
-        );
-      }
-    }
-    if (_reduceMotion) {
-      _press.value = 0;
-      _stretch.value = 0;
-      _membership.value = 1;
-    }
-  }
-
-  @override
-  void dispose() {
-    _restTimer?.cancel();
-    _position.dispose();
-    _press.dispose();
-    _stretch.dispose();
-    _membership.dispose();
-    super.dispose();
-  }
-
-  double _fingerPosition(double x) => ((x - _edge) / _segmentWidth - .5).clamp(
-    0.0,
-    (widget.items.length - 1).toDouble(),
-  );
-
-  Future<void> _spring(
-    AnimationController controller,
-    double target, {
-    double velocity = 0,
-  }) async {
-    if (_reduceMotion) {
-      controller.value = target;
-      return;
-    }
-    try {
-      await controller
-          .animateWith(
-            SpringSimulation(
-              WenkuMotion.spring,
-              controller.value,
-              target,
-              velocity.clamp(-5.0, 5.0),
-            ),
-          )
-          .orCancel;
-      if (mounted) controller.value = target;
-    } on TickerCanceled {
-      // A new touch/animation owns the controller after cancellation.
-    }
-  }
-
-  void _down(PointerDownEvent event) {
-    if (_pointer != null) return;
-    _pointerCancelled = false;
-    _pointer = event.pointer;
-    _lastX = event.localPosition.dx;
-    _lastTime = event.timeStamp;
-    _restTimer?.cancel();
-    _position.stop();
-    // Pointer-down, rather than tap recognition, starts the soft response.
-    if (!_reduceMotion) {
-      _press.animateTo(
-        1,
-        duration: WenkuMotion.contact,
-        curve: WenkuMotion.ease,
-      );
-    }
-    _spring(_position, _fingerPosition(event.localPosition.dx));
-  }
-
-  void _release() {
-    _pointer = null;
-    _restTimer?.cancel();
-    _spring(_press, 0);
-    _spring(_stretch, 0);
-  }
-
-  void _dragStart(DragStartDetails details) {
-    _dragging = true;
-    _position.stop();
-    _lastX = details.localPosition.dx;
-    _lastTime = details.sourceTimeStamp ?? _lastTime;
-    _position.value = _fingerPosition(_lastX);
-  }
-
-  void _dragUpdate(DragUpdateDetails details) {
-    final time = details.sourceTimeStamp ?? _lastTime;
-    final micros = (time - _lastTime).inMicroseconds;
-    final speed = micros > 0
-        ? (details.localPosition.dx - _lastX) * 1e6 / micros
-        : details.delta.dx * 60;
-    _lastX = details.localPosition.dx;
-    _lastTime = time;
-    final finger = _fingerPosition(details.localPosition.dx);
-    // Never restart a time-based tween for every pointer event: high-rate
-    // input can keep resetting it before its first frame. Follow immediately,
-    // with a small spatial lag; the spring takes over only after release.
-    _position.value = _reduceMotion
-        ? finger
-        : _position.value + (finger - _position.value) * .8;
-    if (!_reduceMotion) {
-      // Deform from motion, not total distance. Reversing reverses the meniscus;
-      // holding still lets it relax without moving the touch preview.
-      _stretch.stop();
-      final target = (speed * .028).clamp(-24.0, 24.0);
-      _stretch.value += (target - _stretch.value) * .55;
-      _restTimer?.cancel();
-      _restTimer = Timer(const Duration(milliseconds: 100), () {
-        if (mounted) _spring(_stretch, 0);
+  void _select(int index) {
+    final item = widget.items[index];
+    AppHaptics.play(context, item.haptic);
+    if (index == widget.selectedIndex) {
+      setState(() {
+        _activations[item.identity] = (_activations[item.identity] ?? 0) + 1;
       });
-    }
-  }
-
-  void _settlePosition(int index, {double velocity = 0}) {
-    _targetIndex = index;
-    _spring(_position, index.toDouble(), velocity: velocity);
-  }
-
-  void _commit(int index, {double velocity = 0, bool fromDrag = false}) {
-    if (!widget.items[index].enabled ||
-        (fromDrag && !widget.items[index].selectableOnDrag)) {
-      _cancel();
+      (widget.onReselected ?? widget.onSelected)(index);
       return;
     }
-    _dragging = false;
-    AppHaptics.play(context, widget.items[index].haptic);
     setState(() {
-      final identity = widget.items[index].identity;
-      _iconActivations[identity] = (_iconActivations[identity] ?? 0) + 1;
+      _activations[item.identity] = (_activations[item.identity] ?? 0) + 1;
     });
-    _release();
-    _settlePosition(index, velocity: velocity);
-    if (!fromDrag &&
-        index == widget.selectedIndex &&
-        widget.onReselected != null) {
-      widget.onReselected!(index);
-    } else {
-      widget.onSelected(index);
-    }
-  }
-
-  void _dragEnd(DragEndDetails details) {
-    if (_pointerCancelled) {
-      _cancel();
-      return;
-    }
-    final velocity = (details.primaryVelocity ?? 0) / _segmentWidth;
-    final projected =
-        _fingerPosition(_lastX) + (velocity * .055).clamp(-.22, .22);
-    _commit(
-      projected.round().clamp(0, widget.items.length - 1),
-      velocity: velocity,
-      fromDrag: true,
-    );
-  }
-
-  void _cancel() {
-    if (!mounted) return;
-    _dragging = false;
-    _release();
-    _settlePosition(widget.selectedIndex);
+    widget.onSelected(index);
   }
 
   @override
-  Widget build(BuildContext context) => AnimatedBuilder(
-    animation: _motion,
-    builder: (context, child) {
-      final compact = DockLayout.compactOf(context);
-      final height = DockLayout.heightOf(context);
-      final progress = WenkuMotion.ease.transform(_membership.value);
-      final width = _membership.isCompleted
-          ? widget.items.length * widget.itemWidth + _edge * 2
-          : _slots.fold<double>(
-              _edge * 2,
-              (sum, slot) => sum + slot.width(progress, widget.itemWidth),
-            );
-      final pressure = _reduceMotion ? 0.0 : _press.value.clamp(0.0, 1.0);
-      final flow = _reduceMotion ? 0.0 : _stretch.value;
-      return SizedBox(
-        height: height,
-        width: width,
-        child: Transform.translate(
-          offset: Offset(flow * .16, -pressure * .6),
-          child: Transform.scale(
-            key: const ValueKey('dock-whole-capsule-transform'),
-            scaleX: 1 + pressure * .022 + flow.abs() * .00125,
-            scaleY: 1 + pressure * .065 - flow.abs() * .0006,
-            child: Stack(
-              clipBehavior: Clip.none,
-              children: [
-                Positioned.fill(
-                  child: IgnorePointer(
-                    child: LiquidGlass(
-                      key: const ValueKey('dock-fluid-surface'),
-                      radius: height / 2,
-                      thickness: 16 + pressure * 2,
-                      activation: pressure,
-                      touchPosition:
-                          (_position.value.clamp(
-                                0.0,
-                                (widget.items.length - 1).toDouble(),
-                              ) +
-                              .5) /
-                          widget.items.length,
-                      elevated: false,
-                      child: const SizedBox.expand(),
-                    ),
-                  ),
-                ),
-                Positioned.fill(
-                  child: GlassForeground(
-                    child: LayoutBuilder(
-                      builder: (context, constraints) {
-                        _segmentWidth =
-                            (constraints.maxWidth - _edge * 2) /
-                            widget.items.length;
-                        return IgnorePointer(
-                          ignoring: _membership.isAnimating,
-                          child: Listener(
-                            onPointerDown: _down,
-                            onPointerUp: (event) {
-                              if (event.pointer == _pointer) _release();
-                            },
-                            onPointerCancel: (event) {
-                              if (event.pointer == _pointer) {
-                                _pointerCancelled = true;
-                                _cancel();
-                              }
-                            },
-                            child: GestureDetector(
-                              behavior: HitTestBehavior.opaque,
-                              onTapUp: (details) {
-                                if (!_dragging && !_pointerCancelled) {
-                                  _commit(
-                                    _fingerPosition(
-                                      details.localPosition.dx,
-                                    ).round().clamp(0, widget.items.length - 1),
-                                  );
-                                }
-                              },
-                              onHorizontalDragStart: _dragStart,
-                              onHorizontalDragUpdate: _dragUpdate,
-                              onHorizontalDragEnd: _dragEnd,
-                              onHorizontalDragCancel: _cancel,
-                              // Input spans the visible capsule, including
-                              // its padded rim; labels retain their gutter.
-                              child: Padding(
-                                padding: EdgeInsets.symmetric(
-                                  horizontal: _edge,
-                                  vertical: compact ? 0 : 3,
-                                ),
-                                child: _foreground(progress, compact: compact),
-                              ),
-                            ),
-                          ),
-                        );
-                      },
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      );
-    },
-  );
-
-  Widget _foreground(double progress, {required bool compact}) {
-    var left = 0.0;
-    final children = <Widget>[];
-    for (final slot in _slots) {
-      final width = slot.width(progress, widget.itemWidth);
-      if (width <= .001) continue;
-      children.add(
-        Positioned(
-          key: ValueKey(slot.item.identity),
-          left: left,
-          top: 0,
-          bottom: 0,
-          width: width,
-          child: ClipRect(
-            clipBehavior: width >= widget.itemWidth - .001
-                ? Clip.none
-                : Clip.hardEdge,
-            child: OverflowBox(
-              alignment: Alignment.centerRight,
-              minWidth: widget.itemWidth,
-              maxWidth: widget.itemWidth,
-              child: ExcludeSemantics(
-                excluding: !slot.present,
-                child: _nav(
-                  widget.items.indexWhere(
-                    (item) => item.identity == slot.item.identity,
-                  ),
-                  slot.item,
-                  compact: compact,
-                ),
-              ),
-            ),
-          ),
-        ),
-      );
-      left += width;
-    }
-    return Stack(clipBehavior: Clip.none, children: children);
-  }
-
-  Widget _nav(int index, GlassDockItem item, {required bool compact}) {
-    final proximity = (1 - (_position.value - index).abs()).clamp(0.0, 1.0);
+  Widget build(BuildContext context) {
+    final media = MediaQuery.of(context);
     final scheme = Theme.of(context).colorScheme;
-    final color = !item.enabled && index != widget.selectedIndex
-        ? scheme.onSurfaceVariant.withValues(alpha: .4)
-        : Color.lerp(scheme.onSurfaceVariant, scheme.primary, proximity);
-    final icon = ArchiveIconContact(
-      pressed:
-          _pointer != null &&
-          index >= 0 &&
-          item.enabled &&
-          _fingerPosition(_lastX).round() == index,
-      activation: _iconActivations[item.identity] ?? 0,
-      child: ArchiveIcon(
-        item.icon,
-        symbol: item.symbol,
-        size: compact ? 18 : DockLayout.iconSize,
-        color: color,
-        active: widget.selectedIndex == index,
-        animate:
-            !widget.reduceMotion &&
-            !PerformanceScope.reduceMotionOf(context) &&
-            (widget.animateInactiveIcons || widget.selectedIndex == index),
-      ),
-    );
-    final label = AppText(
-      item.label,
-      maxLines: 1,
-      style: TextStyle(
-        color: color,
-        fontSize: DockLayout.labelFontSize,
-        fontWeight: widget.selectedIndex == index
-            ? FontWeight.w700
-            : FontWeight.w500,
-      ),
-    );
-    return SizedBox(
-      width: widget.itemWidth,
-      child: Semantics(
-        key: ValueKey(
-          index < 0 ? 'dock-outgoing-${item.identity}' : 'dock-tab-$index',
-        ),
-        button: item.enabled,
-        enabled: item.enabled,
-        selected: widget.selectedIndex == index,
-        label: item.semanticLabel ?? item.label,
-        onTap: item.enabled && index >= 0 ? () => _commit(index) : null,
-        child: ExcludeSemantics(
-          child: SizedBox(
-            height: 48,
-            child: Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (compact)
-                    Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        icon,
-                        const SizedBox(width: 5),
-                        Flexible(
-                          child: FittedBox(fit: BoxFit.scaleDown, child: label),
-                        ),
-                      ],
-                    )
-                  else ...[
-                    icon,
-                    const SizedBox(height: 3),
-                    Flexible(
-                      child: FittedBox(fit: BoxFit.scaleDown, child: label),
-                    ),
-                  ],
-                  const SizedBox(height: 3),
-                  ExcludeSemantics(
-                    child: SizedBox(
-                      width: 12,
-                      height: 1.5,
-                      child: ColoredBox(
-                        color: scheme.onSurface.withValues(alpha: proximity),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
+    final eink = WenkuTheme.isEinkOf(context);
+    final performance = PerformanceScope.of(context);
+    final height = DockLayout.heightOf(context);
+    final reduceMotion =
+        widget.reduceMotion || PerformanceScope.reduceMotionOf(context);
+
+    // Cost policy, unchanged from the liquid_glass_easy dock: e-ink, high
+    // contrast, a static backdrop or an in-flight page transition render the
+    // shader-free material; only a settled, live page gets real refraction.
+    final lightweight =
+        eink ||
+        widget.staticMaterial ||
+        widget.animating ||
+        media.highContrast ||
+        !performance.glass;
+
+    final selectedColor = eink ? scheme.onSurface : scheme.primary;
+    final unselectedColor = eink
+        ? scheme.onSurface.withValues(alpha: .72)
+        : scheme.onSurfaceVariant;
+
+    final tabs = <GlassTab>[
+      for (final (index, item) in widget.items.indexed)
+        GlassTab(
+          icon: ArchiveIcon(
+            item.icon,
+            symbol: item.symbol,
+            size: DockLayout.iconSize,
+            active: index == widget.selectedIndex,
+            animate:
+                !reduceMotion &&
+                (widget.animateInactiveIcons || index == widget.selectedIndex),
+            trigger: _activations[item.identity],
           ),
+          label: item.label,
+          semanticLabel: item.semanticLabel ?? item.label,
         ),
+    ];
+
+    final bar = GlassTabBar.bottom(
+      tabs: tabs,
+      selectedIndex: widget.selectedIndex,
+      onTabSelected: _select,
+      barHeight: height,
+      barBorderRadius: height / 2,
+      // The archive capsule hugs its lanes: no package padding around the
+      // glass track, so the outer geometry stays DockLayout's.
+      horizontalPadding: 0,
+      verticalPadding: 0,
+      spacing: 0,
+      tabPadding: EdgeInsets.zero,
+      iconSize: DockLayout.iconSize,
+      labelFontSize: DockLayout.labelFontSize,
+      iconLabelSpacing: DockLayout.labelGap,
+      selectedIconColor: selectedColor,
+      unselectedIconColor: unselectedColor,
+      selectedLabelColor: selectedColor,
+      unselectedLabelColor: unselectedColor,
+      selectedLabelStyle: const TextStyle(fontWeight: FontWeight.w700),
+      unselectedLabelStyle: const TextStyle(fontWeight: FontWeight.w500),
+      indicatorColor: lightweight
+          ? scheme.onSurface.withValues(alpha: eink ? .10 : .08)
+          : null,
+      settings: lightweight ? _solidMaterial(context, scheme) : null,
+      indicatorSettings: lightweight ? _solidIndicator(context, scheme) : null,
+      quality: lightweight ? GlassQuality.minimal : GlassQuality.premium,
+      backgroundQuality: lightweight
+          ? GlassQuality.minimal
+          : GlassQuality.premium,
+      enableBlend: !lightweight,
+      groupBackdrop: !lightweight,
+      maskingQuality: lightweight ? MaskingQuality.off : MaskingQuality.high,
+      interactionBehavior: lightweight
+          ? GlassInteractionBehavior.none
+          : GlassInteractionBehavior.full,
+    );
+
+    final width =
+        widget.items.length * widget.itemWidth + DockLayout.horizontalInset * 2;
+    return LayoutBuilder(
+      builder: (context, constraints) => SizedBox(
+        key: const ValueKey('liquid-dock-surface'),
+        width: constraints.hasBoundedWidth
+            ? math.min(width, constraints.maxWidth)
+            : width,
+        height: height,
+        // The package already honours Reduce Motion / Reduce Transparency;
+        // the e-ink toggle is fqapp-only and must disable motion here too.
+        child: reduceMotion
+            ? MediaQuery(
+                data: media.copyWith(disableAnimations: true),
+                child: bar,
+              )
+            : bar,
       ),
     );
   }
+
+  /// Shader-free material for video / e-ink / page transitions: a flat tinted
+  /// capsule with no backdrop filter (blur 0 skips the BackdropFilter).
+  LiquidGlassSettings _solidMaterial(BuildContext context, ColorScheme scheme) {
+    final eink = WenkuTheme.isEinkOf(context);
+    final surface = eink
+        ? Colors.white
+        : Theme.of(context).brightness == Brightness.dark
+        ? scheme.surfaceContainerHigh
+        : scheme.surface;
+    return LiquidGlassSettings(
+      glassColor: surface.withValues(alpha: eink ? 1 : .94),
+      blur: 0,
+      frost: 0,
+      thickness: 8,
+      lightIntensity: 0,
+      ambientStrength: 0,
+      fresnelStrength: 0,
+      chromaticAberration: 0,
+      saturation: 1,
+      refractiveIndex: 1,
+      shadowElevation: 0,
+      whitenStrength: 0,
+    );
+  }
+
+  /// The sliding lane for the solid material: a tint, no blur and no shader.
+  LiquidGlassSettings _solidIndicator(
+    BuildContext context,
+    ColorScheme scheme,
+  ) => LiquidGlassSettings(
+    glassColor: scheme.onSurface.withValues(alpha: .08),
+    blur: 0,
+    frost: 0,
+    thickness: 4,
+    lightIntensity: 0,
+    ambientStrength: 0,
+    fresnelStrength: 0,
+    chromaticAberration: 0,
+    saturation: 1,
+    refractiveIndex: 1,
+    shadowElevation: 0,
+    whitenStrength: 0,
+  );
 }

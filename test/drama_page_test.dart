@@ -1266,9 +1266,12 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    // Scoped to the bar: the home page's own category strip also has a 短剧 entry.
-    Finder navLabel(String label) =>
-        find.descendant(of: find.byType(GlassDock), matching: find.text(label));
+    // Scoped to the bar: the home page's own category strip also has a 短剧
+    // entry. GlassTabBar draws the lens' selected copy on top of the base row,
+    // so the same label exists twice; both are centered on their lane.
+    Finder navLabel(String label) => find
+        .descendant(of: find.byType(GlassDock), matching: find.text(label))
+        .first;
 
     final home = tester.getCenter(navLabel('首页')).dx;
     final drama = tester.getCenter(navLabel('短剧')).dx;

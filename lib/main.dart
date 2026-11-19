@@ -12,10 +12,12 @@ import 'package:flutter/services.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:liquid_glass_widgets/liquid_glass_widgets.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:hive_ce_flutter/hive_flutter.dart';
 
 import 'dart:async';
+import 'dart:io' show Platform;
 
 import 'services/linux_platform.dart';
 
@@ -95,7 +97,29 @@ Future<void> main() async {
     // 但这条 I/O 走平台通道，不能无上限地挡住 runApp：超时就用默认值启动，
     // `_loadLocalData` 后面还会再读一次并纠正。
     await primeWithBudget(const Duration(milliseconds: 300));
-    runApp(const ProviderScope(child: FqApp()));
+    // 底栏的液态玻璃着色器预编译：失败/超时只记日志，界面照常起来，
+    // 首帧最多按需编译（不挡住 runApp）。`flutter test` 不打包依赖包的
+    // 着色器，预编译会抛 Asset not found，测试环境直接跳过。
+    if (!Platform.environment.containsKey('FLUTTER_TEST')) {
+      try {
+        await LiquidGlassWidgets.initialize(
+          enablePerformanceMonitor: false,
+        ).timeout(const Duration(seconds: 2));
+      } catch (error, stack) {
+        AppLog.e('main', '液态玻璃预加载失败，继续启动', error: error, stack: stack);
+      }
+    }
+    runApp(
+      ProviderScope(
+        child: LiquidGlassWidgets.wrap(
+          // 应用内主题（含短剧 overVideo 的强制深色 / OLED）决定玻璃明暗；
+          // 自适应质量按设备基准把 premium 降级。
+          brightnessResolver: Theme.maybeBrightnessOf,
+          adaptiveQuality: true,
+          child: const FqApp(),
+        ),
+      ),
+    );
   }, (error, stack) => AppLog.e('zone', '未捕获异步异常', error: error, stack: stack));
 }
 

@@ -58,11 +58,14 @@ Non-identical mechanical substitutions:
   `_GlassMenuPlacement` copies were removed; those classes come from the
   single `wenku_overlay.dart` implementation, which keeps the desktop focus
   ring, keyboard activation and traversal.
-- `glass_dock.dart` is upstream `glass_dock.dart` with `NovelMotion` renamed to
-  `WenkuMotion`. `lib/widgets/shell_dock.dart` hosts it with upstream's
-  `DockUnderlay` geometry; the bottom blur uses the vendored scroll-edge pass
-  in place of `NativeBackdrop`. Over the short-drama video feed and on OLED
-  black it uses the upstream lightweight (non-refractive) plate.
+- `glass_dock.dart` was rebuilt on `liquid_glass_widgets`
+  (`GlassTabBar.bottom`): the package owns the glass track, the jelly indicator
+  and lane dragging, while fqapp keeps the upstream `DockLayout` capsule
+  geometry, archive icons and item order. `lib/widgets/shell_dock.dart` hosts
+  it with upstream's `DockUnderlay` geometry; the bottom blur uses the vendored
+  scroll-edge pass in place of `NativeBackdrop`. Over the short-drama video
+  feed, during page transitions and on OLED/e-ink the bar drops to the package's
+  shader-free `GlassQuality.minimal` material instead of live refraction.
 - `wenku_loading.dart` (`loading_ui.dart`), `wenku_reveal.dart`
   (`LoadedContentSequence`/`LoadedContentItem`/`RevealFromTop` from
   `motion_ui.dart`) and `book_collection_layout.dart`

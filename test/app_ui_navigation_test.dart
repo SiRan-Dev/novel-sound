@@ -112,8 +112,11 @@ void main() {
       find.byType(Navigator).first,
     );
 
-    Finder dockLabel(String label) =>
-        find.descendant(of: find.byType(ShellDock), matching: find.text(label));
+    // GlassTabBar renders the selected lane twice for its lens effect; both
+    // copies share the same center, so the first match is the tap target.
+    Finder dockLabel(String label) => find
+        .descendant(of: find.byType(ShellDock), matching: find.text(label))
+        .first;
 
     await tester.tap(dockLabel('书架'));
     await tester.pumpAndSettle();
